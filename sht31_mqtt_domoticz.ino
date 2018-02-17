@@ -3,54 +3,59 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 
-const char* version = "sht31_mqtt_domoticz 2.0";
-const char* date_name = "2018-01-18 neeej";
+const char* version = "sht31_mqtt_domoticz 2.1";
+const char* date_name = "2018-02-17 mike";
 
 // SHT31 temperature and humidity sensor, connected to D1, D2
 // on Wemos D1 mini. Connection according to
 // http://www.esp8266learning.com/wemos-and-sht31.php
 
-// Example on server side for obtaining data from mqtt broker:
+// Example use from server side for obtaining data from mqtt broker:
 // mosquitto_sub -h localhost -t '#' -v
 
 // Wifi settings 
 const char* ssid = "*****";
-const char* password = "******";
+const char* password = "*****";
 
 // device id in domoticz
 //
 // 67 - Garage
 // 68 - Sovrum
 //
-const char* clientID = "68";
+const char* clientID = "67";
 
+// The following parameters are only required for fixed IP,
+// make sure WiFi.config() is uncommented as well for this to work
+IPAddress ip(172, 16, 0, 67);
+IPAddress gateway(172, 16, 0, 1);
+IPAddress subnet(255, 255, 255, 0);
+IPAddress dns(172, 16, 0, 18);
 
-// The follwing parameters are only required for fixed IP, otherwise uncomment, also uncomment WiFi.config(ip, gateway, subnet)
-//IPAddress ip(172, 16, 0, 37); 
-//IPAddress gateway(172, 16, 0, 1);
-//IPAddress subnet(255, 255, 255, 0); 
-
-// How long in ms to sleep until next temp check
-int sleep = 15000;
+// How long in seconds to sleep until next check
+int sleepDelay = 10;
 
 // MQTT server and topic settings
 const char* mqtt_server = "172.16.0.19";
 //const char* mqtt_ID = "TempHum_";
 const char* domoticzTopic = "domoticz/in";
-const char* outTopic = "esp8266/out";     // info and errors mostly
-const char* inTopic = "esp8266/in";
+const char* outTopic = "esp8266/out";     // info and errors to here
+const char* inTopic = "esp8266/in";       // subscribe to this topic
  
 Adafruit_SHT31 sht31 = Adafruit_SHT31(); 
 WiFiClient espClient;
 PubSubClient client(espClient);
- 
+
+
+/*
+ * Functions etc
+ */
 void setup_wifi()
 {
   delay(10);
-  Serial.println("setup started ");
+  Serial.println("WiFi setup started");
 
   // Connect to WiFi network
-  //WiFi.config(ip, gateway, subnet); // Only required for fixed IP
+  //WiFi.config(ip, gateway, subnet, dns); // Only required for fixed IP
   WiFi.begin(ssid, password);
   
   while (WiFi.status() != WL_CONNECTED) {
@@ -60,8 +65,9 @@ void setup_wifi()
   
   Serial.println("");
   Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.println("IP address:");
   Serial.println(WiFi.localIP());
+  Serial.println("");
 }
 
 void setup_sht()
@@ -69,7 +75,10 @@ void setup_sht()
   // Connect to SHT31
   if (! sht31.begin(0x44)) 
   {
-    Serial.println("Couldn't find SHT31");
+    char msg[50] = "Error: Couldn't find SHT31..";
+    strcat(msg, clientID);
+    client.publish(outTopic, msg);
+    Serial.println(msg);
     while (1) delay(1);
   }
 }
@@ -77,30 +86,25 @@ void setup_sht()
 void callback(char* topic, byte* payload, unsigned int length) {
   // Check incoming message using really ugly code
   String nstring = "";
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
+  Serial.println("Message arrived [" + String(topic) + "] ");
   for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
     nstring = String (nstring + (char)payload[i]);
   }
   nstring = String (nstring + '\0');
   Serial.println("");
-  Serial.print("nstring = ");
-  Serial.println(nstring);
+  Serial.println("nstring = " + String(nstring));
   int value;
   if (String(topic + '\0' == inTopic)) {
     value = nstring.toInt(); // (long) 0 is returned if unsuccessful)
     if (value > 0 ) {
-      // Serial.print("TBD value change to ");
-      Serial.print(value);
-      Serial.println(" requested");
-      // print message
-      char msg[50] = "status requested for ";
-      strcat(msg, clientID);
-      //strcat(msg, ". My ip is ");
-      //strcat(msg, String(WiFi.localIP()));
-      client.publish(outTopic, msg);
+      Serial.println(String(value) + " requested");
+      // print message to mqtt
+      String data = "status requested for " + String(clientID) + ". My ip is " + WiFi.localIP().toString();
+      int length = data.length();
+      char msgBuffer[length];
+      data.toCharArray(msgBuffer,length+1);
+      client.publish(outTopic, msgBuffer);
     }
   }
 }
@@ -116,15 +120,13 @@ void reconnect() {
     if (client.connect(mqtt_ID)) {
       Serial.println("connected");
       // Once connected, publish an announcement...
-      char msg[50] = "new connection setup from sensor ID ";
+      char msg[50] = "this is a new connection setup, from client ID ";
       strcat(msg, clientID);
       client.publish(outTopic, msg);
       // ... and resubscribe
       client.subscribe(inTopic);
     } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
+      Serial.println("failed, rc=" + String(client.state()) + ", trying again in 5 seconds");
       // Wait 5 seconds before retrying
       delay(5000);
     }
@@ -136,23 +138,14 @@ void setup()
   //pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
   Serial.begin(115200);
   setup_wifi();
-  setup_sht();
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
-
+  setup_sht();
 }
 
-void loop() 
+void sht31_temp_hum()
 {
   
-  // Check if a client has connected
-  if (!client.connected()) {
-    reconnect();
-  }
-
-  // Perform PubSubClient tasks
-  client.loop();
-
   // Get data
   float temperature = sht31.readTemperature();
   float humidity = sht31.readHumidity();
@@ -168,7 +161,7 @@ void loop()
   if (! isnan(temperature)) 
   {
     // Temperature read
-    Serial.print("Temp *C = "); Serial.println(temperature);
+    Serial.println("Temp *C = " + String(temperature));
     char msg[25]; 
     dtostrf(temperature , 5, 1, msg); // width including sign, "." . etc., precision/decimals
     // remove blanks
@@ -185,17 +178,17 @@ void loop()
   else 
   {
     error++;
-    char msg[50] = "Failed to read temperature on ID ";
+    char msg[50] = "Failed to read temperature, for client ID ";
     strcat(msg, clientID);
     client.publish(outTopic, msg);
-    Serial.println("Failed to read temperature");
+    Serial.println(msg);
   }
   strcat(mqtt_msg, ";");
  
   if (! isnan(humidity)) 
   {
     // Humidity read
-    Serial.print("Hum. % = "); Serial.println(humidity);
+    Serial.println("Hum. %  = " + String(humidity));
     char msg[25]; 
     dtostrf(humidity , 5, 1, msg); // width including sign, "." etc., precision/decimals
     // remove blanks
@@ -226,7 +219,7 @@ void loop()
       hum_stat = 1;
     }
 
-    Serial.print("Hum status = "); Serial.println(hum_stat);
+    Serial.println("Hum. status = " + String(hum_stat));
     char buf[8];
     sprintf(buf,"%d",hum_stat);
     strcat(mqtt_msg, buf);
@@ -234,10 +227,10 @@ void loop()
   else 
   {
     error++;
-    char msg[50] = "Failed to read humidity on ID ";
+    char msg[50] = "Failed to read humidity, for client ID ";
     strcat(msg, clientID);
     client.publish(outTopic, msg);
-    Serial.println("Failed to read humidity");
+    Serial.println(msg);
   }
 
   strcat(mqtt_msg, "\" }");
@@ -249,5 +242,20 @@ void loop()
   }
   
   Serial.println();
-  delay(sleep);
+}
+
+void loop()
+{
+  // Check if MQTT client is connected, otherwise reconnect
+  if (!client.connected()) {
+    reconnect();
+  }
+
+  // maintain the MQTT connection and check for incoming messages
+  client.loop();
+
+  // Get data from temp sensor (temperature + humidity) and send to mqtt queue
+  sht31_temp_hum();
+
+  delay(sleepDelay * 1000);
 }
